@@ -1,0 +1,68 @@
+name: Build and release Onslaught
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -A x64
+          cmake --build build --config Release
+      - name: Tests
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory distribution/Onslaught -Force
+          Copy-Item build/Release/Onslaught.exe,build/Release/OnslaughtEngine.exe,README.md,LICENSE distribution/Onslaught
+          New-Item -ItemType Directory distribution/Onslaught/assets -Force
+          Copy-Item assets/onslaught.png,assets/onslaught-readme.png distribution/Onslaught/assets
+          Compress-Archive distribution/Onslaught distribution/Onslaught-Windows-x64.zip
+          (Get-FileHash distribution/Onslaught-Windows-x64.zip -Algorithm SHA256).Hash | Set-Content distribution/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Onslaught-Windows-x64
+          path: distribution/*.*
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $source = Get-Content src/release.h -Raw
+          $match = [regex]::Match($source, 'Version\[\]=L"([0-9.]+)"')
+          $releaseTag = "v$($match.Groups[1].Value)"
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            if ($env:GITHUB_REF_NAME -ne 'main') { throw 'Manual releases must run from main.' }
+            gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$releaseTag" -f "sha=$env:GITHUB_SHA" -F force=true
+            if ($LASTEXITCODE -ne 0) { throw 'Could not synchronize the release tag.' }
+          } elseif ($env:GITHUB_REF_NAME -ne $releaseTag) { throw 'Tag must match src/release.h Version. Update the app version before tagging.' }
+          gh release view $releaseTag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $releaseTag distribution/Onslaught-Windows-x64.zip distribution/SHA256.txt --clobber
+          } else {
+            gh release create $releaseTag distribution/Onslaught-Windows-x64.zip distribution/SHA256.txt --verify-tag --title "Onslaught $releaseTag" --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
+
+      - name: Remove superseded prototype releases
+        if: github.ref == 'refs/tags/v1.0.0'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          foreach ($tag in @('v0.13.0', 'v0.13.1', 'v0.13.2', 'v0.13.3')) {
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) {
+              gh release delete $tag --repo $env:GITHUB_REPOSITORY --cleanup-tag --yes
+              if ($LASTEXITCODE -ne 0) { throw "Could not remove superseded release $tag" }
+            }
+          }

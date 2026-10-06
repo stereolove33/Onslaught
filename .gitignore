@@ -1,0 +1,9 @@
+/build*/
+/logs/
+/sessions/
+/settings.ini
+/*.exe
+/*.zip
+/*preview.png
+*.user
+*.pdb
